@@ -1,0 +1,177 @@
+package ru.minced.client.feature.module.impl.movement;
+
+import net.minecraft.client.network.ClientPlayerEntity;
+import net.minecraft.entity.Entity;
+import net.minecraft.network.packet.c2s.play.ClientCommandC2SPacket;
+import net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket;
+import net.minecraft.util.math.Vec3d;
+import ru.minced.client.event.EventTarget;
+import ru.minced.client.event.events.impl.packet.EventSendPacket;
+import ru.minced.client.event.events.impl.player.EventUpdate;
+import ru.minced.client.feature.module.Module;
+import ru.minced.client.feature.module.ModuleCategory;
+import ru.minced.client.feature.setting.impl.BooleanSetting;
+import ru.minced.client.feature.setting.impl.SliderSetting;
+
+public class Freecam extends Module {
+    
+    private final SliderSetting speed = new SliderSetting("Speed", 1.0f, 0.1f, 5.0f, 0.1f);
+    private final BooleanSetting noClip = new BooleanSetting("No Clip", true);
+    private final BooleanSetting freezePlayer = new BooleanSetting("Freeze Player", true);
+    
+    private double oldX, oldY, oldZ;
+    private float oldYaw, oldPitch;
+    private Entity fakePlayer;
+    
+    public Freecam() {
+        super("Freecam", "Allows free camera movement", ModuleCategory.MOVEMENT);
+        addSettings(speed, noClip, freezePlayer);
+    }
+    
+    @Override
+    public void onEnable() {
+        if (mc.player == null) {
+            toggle();
+            return;
+        }
+        
+        // Save player position
+        oldX = mc.player.getX();
+        oldY = mc.player.getY();
+        oldZ = mc.player.getZ();
+        oldYaw = mc.player.getYaw();
+        oldPitch = mc.player.getPitch();
+        
+        // Create fake player entity at original position
+        if (freezePlayer.get()) {
+            createFakePlayer();
+        }
+        
+        // Set player to spectator-like state
+        if (noClip.get()) {
+            mc.player.noClip = true;
+        }
+        
+        super.onEnable();
+    }
+    
+    @Override
+    public void onDisable() {
+        if (mc.player == null) return;
+        
+        // Restore player position
+        mc.player.setPosition(oldX, oldY, oldZ);
+        mc.player.setYaw(oldYaw);
+        mc.player.setPitch(oldPitch);
+        
+        // Remove fake player
+        if (fakePlayer != null && mc.world != null) {
+            mc.world.removeEntity(fakePlayer.getId(), Entity.RemovalReason.DISCARDED);
+            fakePlayer = null;
+        }
+        
+        // Restore collision
+        mc.player.noClip = false;
+        
+        super.onDisable();
+    }
+    
+    @EventTarget
+    public void onUpdate(EventUpdate event) {
+        if (mc.player == null) return;
+        
+        // Calculate movement vector based on camera direction
+        float moveSpeed = speed.get().floatValue();
+        float forward = 0;
+        float strafe = 0;
+        float vertical = 0;
+        
+        // Movement inputs
+        if (mc.options.forwardKey.isPressed()) forward += 1;
+        if (mc.options.backKey.isPressed()) forward -= 1;
+        if (mc.options.leftKey.isPressed()) strafe += 1;
+        if (mc.options.rightKey.isPressed()) strafe -= 1;
+        if (mc.options.jumpKey.isPressed()) vertical += 1;
+        if (mc.options.sneakKey.isPressed()) vertical -= 1;
+        
+        // Apply no movement if frozen
+        if (freezePlayer.get()) {
+            // Calculate movement based on camera rotation
+            double yaw = Math.toRadians(mc.player.getYaw());
+            double pitch = Math.toRadians(mc.player.getPitch());
+            
+            double motionX = 0;
+            double motionY = 0;
+            double motionZ = 0;
+            
+            if (forward != 0 || strafe != 0) {
+                // Horizontal movement
+                double angle = Math.atan2(forward, strafe);
+                motionX = -Math.sin(yaw + angle) * moveSpeed;
+                motionZ = Math.cos(yaw + angle) * moveSpeed;
+            }
+            
+            // Vertical movement
+            motionY = vertical * moveSpeed;
+            
+            // Apply movement
+            mc.player.setVelocity(motionX, motionY, motionZ);
+            mc.player.setPosition(
+                mc.player.getX() + motionX,
+                mc.player.getY() + motionY,
+                mc.player.getZ() + motionZ
+            );
+        }
+        
+        // Keep noclip enabled
+        if (noClip.get()) {
+            mc.player.noClip = true;
+        }
+    }
+    
+    @EventTarget
+    public void onPacketSend(EventSendPacket event) {
+        if (mc.player == null) return;
+        
+        // Cancel movement packets to prevent server-side position updates
+        if (freezePlayer.get()) {
+            if (event.getPacket() instanceof PlayerMoveC2SPacket) {
+                event.cancel();
+            }
+            
+            // Cancel sprinting/sneaking packets
+            if (event.getPacket() instanceof ClientCommandC2SPacket) {
+                event.cancel();
+            }
+        }
+    }
+    
+    private void createFakePlayer() {
+        if (mc.world == null || mc.player == null) return;
+        
+        try {
+            // Create a copy of the player entity
+            ClientPlayerEntity player = mc.player;
+            fakePlayer = new ClientPlayerEntity(
+                mc, 
+                mc.world, 
+                player.networkHandler,
+                player.getStatHandler(),
+                player.getRecipeBook(),
+                false,
+                false
+            );
+            
+            // Copy position and rotation
+            fakePlayer.copyPositionAndRotation(player);
+            fakePlayer.setHeadYaw(player.headYaw);
+            fakePlayer.bodyYaw = player.bodyYaw;
+            
+            // Add to world
+            mc.world.addEntity(fakePlayer.getId(), fakePlayer);
+        } catch (Exception e) {
+            // Fallback: just don't create fake player
+            fakePlayer = null;
+        }
+    }
+}
